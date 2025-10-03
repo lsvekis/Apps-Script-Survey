@@ -1,0 +1,294 @@
+<script>
+(async function () {
+  var app       = document.getElementById('app');
+  var btnBack   = document.getElementById('btnBack');
+  var btnNext   = document.getElementById('btnNext');
+  var btnSubmit = document.getElementById('btnSubmit');
+  var btnReview = document.getElementById('btnReview');
+  var progress  = document.querySelector('#progressBar span');
+  var stepLabel = document.getElementById('stepLabel');
+  var navFooter = document.getElementById('navFooter');
+
+  function h(tag, attrs, children){
+    if (!attrs) attrs = {};
+    var el = document.createElement(tag);
+    for (var k in attrs){
+      var v = attrs[k];
+      if (k === 'class') el.className = v;
+      else if (k === 'for') el.htmlFor = v;
+      else if (k.indexOf('on') === 0 && typeof v === 'function') el.addEventListener(k.substring(2), v);
+      else el.setAttribute(k, v);
+    }
+    if (children != null){
+      var arr = Array.isArray(children) ? children : [children];
+      for (var i=0;i<arr.length;i++){ var c = arr[i]; if (c==null) continue;
+        el.appendChild(typeof c === 'string' ? document.createTextNode(c) : c);
+      }
+    }
+    return el;
+  }
+  function slug(s){ return String(s).toLowerCase().replace(/[^a-z0-9]+/g,'-'); }
+  function grow(ta){ ta.style.height='auto'; ta.style.height=Math.max(220, ta.scrollHeight)+'px'; }
+  function toText(v){ if (v==null || v==='') return ''; return Array.isArray(v) ? v.join('; ') : String(v); }
+
+  // Load questions (server returns JSON string or object)
+  var data;
+  try {
+    var raw = await new Promise(function(resolve,reject){
+      google.script.run.withSuccessHandler(resolve).withFailureHandler(reject).loadQuestions();
+    });
+    data = (typeof raw === 'string') ? JSON.parse(raw) : raw;
+  } catch (e) {
+    data = { ok:false, error: e && e.message ? e.message : String(e) };
+  }
+  if (!data || data.ok !== true || !Array.isArray(data.questions)) {
+    app.innerHTML = '<div class="section-card"><div class="error">Failed to load: ' + (data && data.error ? data.error : 'Unknown') + '</div></div>';
+    return;
+  }
+
+  // Build pages: one per section + final Review
+  var questions = data.questions.slice();
+  var pages = []; // {kind:'section', name, items:[]} ... {kind:'review'}
+  for (var i=0;i<questions.length;i++){
+    var q = questions[i], sec = null;
+    for (var j=0;j<pages.length;j++){
+      if (pages[j].kind==='section' && pages[j].name===q.section){ sec = pages[j]; break; }
+    }
+    if (!sec){ sec = { kind:'section', name:q.section, items:[] }; pages.push(sec); }
+    sec.items.push(q);
+  }
+  for (var p=0;p<pages.length;p++) if (pages[p].items) pages[p].items.sort(function(a,b){ return a.order - b.order; });
+  pages.push({ kind:'review' });
+
+  var page = 0;
+  var answers = {}; // code -> value
+
+  function renderPage(){
+    app.innerHTML = '';
+    var current = pages[page];
+
+    if (current.kind === 'section'){
+      var card = h('div', {class:'section-card'}, [
+        h('h2', {}, current.name),
+        h('p', {class:'section-desc'}, page===0 ? 'Required questions are marked with *' : ''),
+        (function(){
+          var frag = document.createDocumentFragment();
+          for (var k=0;k<current.items.length;k++) frag.appendChild(renderQ(current.items[k]));
+          return frag;
+        })(),
+        h('div', {id:'pageMsg'})
+      ]);
+      app.appendChild(card);
+    } else {
+      app.appendChild(renderReviewPreSubmit());
+    }
+
+    navFooter.hidden = false;
+    btnBack.disabled = (page === 0);
+    btnNext.hidden   = (page >= pages.length - 1);
+    btnSubmit.hidden = (page !== pages.length - 1);
+    btnReview.hidden = (page === pages.length - 1);
+
+    var pct = Math.round(((page+1)/pages.length)*100);
+    progress.style.width = pct + '%';
+    stepLabel.textContent = 'Step ' + (page+1) + ' of ' + pages.length;
+  }
+
+  function renderQ(q){
+    var wrap = h('div', {class:'q', id:'q-'+q.code});
+    wrap.appendChild(h('label', {class:'title', for:'inp-'+q.code}, [
+      q.text, q.required ? h('span',{class:'req'},'*') : '',
+      q.type==='likert' ? ' (scale '+q.scale_min+'–'+q.scale_max+')' : ''
+    ]));
+
+    var node;
+    if (q.type==='short'){
+      node = h('input', {type:'text', id:'inp-'+q.code, oninput:function(e){ set(q.code, e.target.value); }});
+    } else if (q.type==='long'){
+      node = h('textarea', {id:'inp-'+q.code, rows:'10', oninput:function(e){ grow(e.target); set(q.code, e.target.value); }});
+      setTimeout(function(){ if (answers[q.code]){ node.value = answers[q.code]; grow(node);} },0);
+    } else if (q.type==='single'){
+      node = h('div', {class:'options'});
+      for (var i=0;i<q.options.length;i++){
+        (function(opt){
+          var id = 'opt-'+q.code+'-'+slug(opt);
+          node.appendChild(h('label', {class:'chip', for:id}, [
+            h('input', {type:'radio', id:id, name:'r-'+q.code, value:opt, onchange:function(){ set(q.code,opt); }}),
+            h('span', {}, opt)
+          ]));
+        })(q.options[i]);
+      }
+    } else if (q.type==='multi'){
+      node = h('div', {class:'options'});
+      for (var m=0;m<q.options.length;m++){
+        (function(opt){
+          var id = 'chk-'+q.code+'-'+slug(opt);
+          node.appendChild(h('label', {class:'chip', for:id}, [
+            h('input', {type:'checkbox', id:id, value:opt, onchange:function(e){
+              var prev = Array.isArray(answers[q.code]) ? answers[q.code].slice() : [];
+              var dict = {}; for (var x=0;x<prev.length;x++) dict[prev[x]] = true;
+              if (e.target.checked) dict[opt]=true; else delete dict[opt];
+              var out=[]; for (var k in dict) if (dict.hasOwnProperty(k)) out.push(k);
+              set(q.code,out);
+            }}),
+            h('span', {}, opt)
+          ]));
+        })(q.options[m]);
+      }
+    } else if (q.type==='likert'){
+      node = h('div', {class:'segmented'});
+      for (var s=q.scale_min; s<=q.scale_max; s++){
+        (function(val){
+          var id = 'lk-'+q.code+'-'+val;
+          node.appendChild(h('label', {}, [
+            h('input', {type:'radio', name:'lk-'+q.code, id:id, value:String(val), onchange:function(){ set(q.code, Number(val)); }}),
+            h('span', {}, String(val))
+          ]));
+        })(s);
+      }
+    } else {
+      node = h('div', {class:'muted'}, 'Unsupported: '+q.type);
+    }
+
+    wrap.appendChild(node);
+    wrap.appendChild(h('div', {class:'error', id:'err-'+q.code}));
+    setTimeout(function(){ hydrate(q); },0);
+    return wrap;
+  }
+
+  function renderReviewPreSubmit(){
+    var card = h('div', {class:'section-card'}, [
+      h('h2', {}, 'Review'),
+      h('p', {class:'section-desc'}, 'Please review your answers. Use “Edit section” to jump back.')
+    ]);
+    for (var i=0;i<pages.length;i++){
+      var pg = pages[i]; if (pg.kind!=='section') continue;
+
+      var tbody = h('tbody');
+      for (var j=0;j<pg.items.length;j++){
+        var q = pg.items[j];
+        var text = toText(answers[q.code]);
+        tbody.appendChild(h('tr', {}, [
+          h('td', {style:'width:30%; font-weight:600; border:1px solid var(--border); padding:8px 10px; background:#f8fafc;'}, q.text),
+          h('td', {style:'border:1px solid var(--border); padding:8px 10px; white-space:pre-wrap;'}, text ? text : h('span',{class:'muted'},'(blank)'))
+        ]));
+      }
+      var table = h('table', {class:'table'});
+      table.appendChild(h('thead', {}, [ h('tr', {}, [ h('th', {colspan:'2'}, pg.name) ]) ]));
+      table.appendChild(tbody);
+
+      var editBtn = h('button', {class:'btn', onclick:(function(idx){
+        return function(){ page = idx; renderPage(); window.scrollTo({top:0, behavior:'smooth'}); };
+      })(i)}, 'Edit section');
+
+      card.appendChild(table);
+      card.appendChild(h('div', {style:'margin:6px 0 16px'}, [editBtn]));
+    }
+    card.appendChild(h('div', {id:'pageMsg'}));
+    return card;
+  }
+
+  function set(code,v){ answers[code]=v; var el=document.getElementById('err-'+code); if (el) el.textContent=''; }
+  function hydrate(q){
+    var v=answers[q.code]; if (v==null) return;
+    if (q.type==='short' || q.type==='long'){
+      var el=document.getElementById('inp-'+q.code); if (el){ el.value=v; if (q.type==='long') grow(el); }
+    } else if (q.type==='single'){
+      var id='opt-'+q.code+'-'+slug(v); var r=document.getElementById(id); if (r) r.checked=true;
+    } else if (q.type==='multi' && Array.isArray(v)){
+      for (var i=0;i<v.length;i++){ var c=document.getElementById('chk-'+q.code+'-'+slug(v[i])); if (c) c.checked=true; }
+    } else if (q.type==='likert' && typeof v==='number'){
+      var lk=document.getElementById('lk-'+q.code+'-'+v); if (lk) lk.checked=true;
+    }
+  }
+  function validateCurrentPage(){
+    var pdef=pages[page]; if (pdef.kind!=='section') return {};
+    var errs={};
+    for (var i=0;i<pdef.items.length;i++){
+      var q=pdef.items[i]; if (!q.required) continue;
+      var v=answers[q.code];
+      if (q.type==='multi'){ if (!Array.isArray(v) || v.length===0) errs[q.code]='This question is required.'; }
+      else if (v===undefined || v===null || v==='') errs[q.code]='This question is required.';
+    }
+    for (var code in errs){ var el=document.getElementById('err-'+code); if (el) el.textContent=errs[code]; }
+    return errs;
+  }
+
+  btnBack.addEventListener('click', function(){
+    if (page>0){ page--; renderPage(); window.scrollTo({top:0, behavior:'smooth'}); }
+  });
+  btnNext.addEventListener('click', function(){
+    var errs=validateCurrentPage();
+    if (Object.keys(errs).length){
+      var first=Object.keys(errs)[0]; var node=document.getElementById('q-'+first);
+      if (node && node.scrollIntoView) node.scrollIntoView({behavior:'smooth', block:'center'});
+      return;
+    }
+    if (page < pages.length-1){ page++; renderPage(); window.scrollTo({top:0, behavior:'smooth'}); }
+  });
+  btnReview.addEventListener('click', function(){
+    var errs=validateCurrentPage();
+    if (Object.keys(errs).length){
+      var first=Object.keys(errs)[0]; var node=document.getElementById('q-'+first);
+      if (node && node.scrollIntoView) node.scrollIntoView({behavior:'smooth', block:'center'});
+    } else {
+      page = pages.length-1; renderPage(); window.scrollTo({top:0, behavior:'smooth'});
+    }
+  });
+
+  btnSubmit.addEventListener('click', async function(){
+    var resBox=document.getElementById('pageMsg'); if (resBox){ resBox.className=''; resBox.textContent='Submitting…'; }
+    try {
+      var raw = await new Promise(function(resolve,reject){
+        google.script.run.withSuccessHandler(resolve).withFailureHandler(reject).submitRow({ answers: answers });
+      });
+      var res = (typeof raw === 'string') ? JSON.parse(raw) : raw;
+      if (!res || res.ok !== true) throw new Error(res && res.error ? res.error : 'Unknown server response.');
+
+      // Hide progress/footer and replace form with read-only summary
+      var pw=document.querySelector('.progress-wrap'); if (pw) pw.style.display='none';
+      navFooter.hidden = true;
+
+      var summary = h('div', {class:'section-card'}, [
+        h('h2', {}, 'Thank you — your submission was received'),
+        h('p', {class:'section-desc'}, 'Submission ID: ' + res.submissionId)
+      ]);
+      for (var i=0;i<pages.length;i++){
+        var pg=pages[i]; if (pg.kind!=='section') continue;
+        var tbody=h('tbody'); var any=false;
+        for (var j=0;j<pg.items.length;j++){
+          var q=pg.items[j]; var val=toText(answers[q.code]); if (!val) continue;
+          any=true;
+          tbody.appendChild(h('tr', {}, [
+            h('td', {style:'width:30%;font-weight:600;border:1px solid var(--border);padding:8px 10px;background:#f8fafc;'}, q.text),
+            h('td', {style:'border:1px solid var(--border);padding:8px 10px;white-space:pre-wrap;'}, val)
+          ]));
+        }
+        if (any){
+          var table=h('table',{class:'table'});
+          table.appendChild(h('thead', {}, [ h('tr', {}, [ h('th', {colspan:'2'}, pg.name) ]) ]));
+          table.appendChild(tbody);
+          summary.appendChild(table);
+        }
+      }
+      app.innerHTML=''; app.appendChild(summary); window.scrollTo({top:0, behavior:'smooth'});
+      document.onkeydown = null; // disable Enter nav after submit
+    } catch(e) {
+      if (resBox){ resBox.className='error'; resBox.textContent='Submit failed: '+(e && e.message ? e.message : String(e)); }
+    }
+  });
+
+  // Keyboard: Enter = Next/Submit (not in textarea)
+  document.addEventListener('keydown', function(e){
+    var tgt = e.target || e.srcElement;
+    if (tgt && tgt.tagName === 'TEXTAREA') return;
+    if (e.key === 'Enter'){
+      e.preventDefault();
+      if (page < pages.length - 1) btnNext.click();
+      else btnSubmit.click();
+    }
+  });
+
+  renderPage();
+})();
+</script>
