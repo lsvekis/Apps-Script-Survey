@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <?!= HtmlService.createHtmlOutputFromFile('Styles').getContent(); ?>
+  <title>Survey</title>
+</head>
+<body>
+  <header class="app-header">
+    <div class="brand">
+      <div class="logo">S</div>
+      <div>
+        <h1>Survey</h1>
+        <p>Please share your feedback. Required questions are marked with *</p>
+      </div>
+    </div>
+    <div class="progress-wrap">
+      <div id="progressBar" class="progress"><span style="width:0%"></span></div>
+      <div id="stepLabel" class="step-label">Step 1 of 1</div>
+    </div>
+  </header>
+
+  <main class="container">
+    <div id="app" class="loading">Loading…</div>
+  </main>
+
+  <footer class="nav-footer" id="navFooter" hidden>
+    <div class="nav-inner">
+      <button class="btn" id="btnBack" disabled>Back</button>
+      <div class="spacer"></div>
+      <button class="btn" id="btnReview">Review</button>
+      <button class="btn" id="btnNext">Next</button>
+      <button class="btn primary" id="btnSubmit" hidden>Submit</button>
+    </div>
+  </footer>
+
+  <?!= HtmlService.createHtmlOutputFromFile('Script').getContent(); ?>
+</body>
+</html>
